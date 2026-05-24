@@ -15,18 +15,41 @@ from typing import Optional
 class FakeQuantize(torch.autograd.Function):
     """前向：量化→反量化；反向：STE (Straight-Through Estimator)。
 
-    gradient 直接绕过量化截断，传给浮点权重 —— 标准 QAT 做法。
+    - 对输入 x: gradient 直接绕过量化截断（标准 STE）
+    - 对 scale/zero_point: 通过量化的解析梯度传播（LSQ 风格）
     """
 
     @staticmethod
     def forward(ctx, x, scale, zero_point, bits, symmetric):
-        x_clamped = _ste_quant(x, scale, zero_point, bits, symmetric)
-        return x_clamped
+        qmin, qmax = 0, (1 << bits) - 1
+        x_div = x / scale
+        if symmetric:
+            x_q = torch.clamp(torch.round(x_div), qmin, qmax)
+            x_dq = x_q * scale
+        else:
+            x_q = torch.clamp(torch.round(x_div + zero_point), qmin, qmax)
+            x_dq = (x_q - zero_point) * scale
+        ctx.save_for_backward(x_q, scale, zero_point)
+        ctx.symmetric = symmetric
+        return x_dq
 
     @staticmethod
     def backward(ctx, grad_output):
-        # STE: 梯度原样通过（不经过量化截断）
-        return grad_output, None, None, None, None
+        x_q, scale, zero_point = ctx.saved_tensors
+        symmetric = ctx.symmetric
+        # STE: x 的梯度原样通过
+        grad_x = grad_output
+        # scale/zero_point 梯度: 用 grad_output 在 batch 维求和, 再 reshape 匹配 shape
+        grad_scale = None
+        grad_zero_point = None
+        if ctx.needs_input_grad[1]:
+            # ∂x_dq/∂scale = x_q (对称) 或 x_q - zp (非对称)
+            raw = grad_output * (x_q - zero_point)
+            grad_scale = raw.reshape(-1, *scale.shape).sum(dim=0)
+        if ctx.needs_input_grad[2] and not symmetric:
+            raw = -grad_output * scale
+            grad_zero_point = raw.reshape(-1, *zero_point.shape).sum(dim=0)
+        return grad_x, grad_scale, grad_zero_point, None, None
 
 
 def _ste_quant(x, scale, zero_point, bits, symmetric):
@@ -115,7 +138,30 @@ class FakeQuantLinear(nn.Module):
 
 
 def _replace_linear_recursive(module, bits, symmetric, per_channel, start_epoch):
-    """递归替换 nn.Linear 为 FakeQuantLinear。"""
+    """递归替换 nn.Linear 为 FakeQuantLinear。
+
+    如果 module 本身是 nn.Linear 也替换。
+    """
+    if isinstance(module, nn.Linear):
+        new_layer = FakeQuantLinear(
+            in_features=module.in_features,
+            out_features=module.out_features,
+            bits=bits,
+            symmetric=symmetric,
+            per_channel=per_channel,
+            bias=module.bias is not None,
+        )
+        new_layer.weight.data.copy_(module.weight.data)
+        if module.bias is not None:
+            new_layer.bias.data.copy_(module.bias.data)
+        # 初始化 scale
+        if per_channel:
+            scale_init = module.weight.data.abs().max(dim=1, keepdim=True).values
+        else:
+            scale_init = module.weight.data.abs().max().unsqueeze(0)
+        new_layer.scale.data.copy_(scale_init / ((1 << (bits - 1)) - 1) + 1e-10)
+        return new_layer
+
     for name, child in list(module.named_children()):
         if isinstance(child, nn.Linear):
             new_layer = FakeQuantLinear(

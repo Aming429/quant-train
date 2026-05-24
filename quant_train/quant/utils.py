@@ -16,9 +16,8 @@ def quantize_tensor(
     qmin, qmax = 0, (1 << bits) - 1
 
     if per_channel:
-        dim = list(range(x.dim() - 1))  # 最后一维是通道
-        if not dim:
-            dim = 0
+        # per-channel: 对最后一维取 min/max → 每个通道一个 scale
+        dim = x.dim() - 1
         min_val = x.amin(dim=dim, keepdim=True)
         max_val = x.amax(dim=dim, keepdim=True)
     else:

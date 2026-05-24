@@ -42,8 +42,9 @@ class TestIntegration:
         """用 GPT-2 tiny 验证 LLM QAT 流程可启动（纯 CPU，不要求收敛）。"""
         try:
             from transformers import AutoModelForCausalLM
-        except ImportError:
-            pytest.skip("需要 transformers")
+            _ = AutoModelForCausalLM.from_pretrained("hf-internal-testing/tiny-random-gpt2")
+        except (ImportError, OSError):
+            pytest.skip("需要 transformers 或网络连接")
 
         model = AutoModelForCausalLM.from_pretrained("hf-internal-testing/tiny-random-gpt2")
         model = prepare_model_with_fake_quant(

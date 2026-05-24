@@ -26,16 +26,15 @@ class TestFakeQuantLinear:
         assert (layer.zero_point == 0).all(), "对称量化 zero_point 应为 0"
 
     def test_weight_preserved_after_replace(self):
-        """替换后权重应与原 Linear 一致（初始化时）。"""
+        """替换后权重应与原 Linear 一致（初始化时，且 root 自身也应替换）。"""
         original = torch.nn.Linear(10, 20)
         orig_weight = original.weight.data.clone()
 
         from quant_train.quant.qat import _replace_linear_recursive
-        _replace_linear_recursive(original, bits=8, symmetric=False, per_channel=False, start_epoch=0)
+        replaced = _replace_linear_recursive(original, bits=8, symmetric=False, per_channel=False, start_epoch=0)
 
-        # original 的第一层已被替换
-        assert isinstance(original, FakeQuantLinear)
-        assert torch.allclose(original.weight.data, orig_weight), "权重应被保留"
+        assert isinstance(replaced, FakeQuantLinear), "root Linear 应被替换为 FakeQuantLinear"
+        assert torch.allclose(replaced.weight.data, orig_weight), "权重应被保留"
 
     def test_epoch_gating(self):
         """验证 set_epoch 控制伪量化开关。"""
