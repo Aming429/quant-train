@@ -67,6 +67,10 @@ def main():
         quant_cfg=quant_cfg,
     )
 
+    # 计算总 step 数供 scheduler 用
+    total_steps = len(train_loader) * config["training"]["num_epochs"]
+    config["training"]["total_steps"] = total_steps
+
     # 训练器
     trainer = QATTrainer(model, config, device)
 
