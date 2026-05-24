@@ -1,20 +1,31 @@
+# 公司 GPU 训练配置
+
 model:
-  name: "meta-llama/Llama-3.2-1B"   # 1B 在公司卡上跑，先不要上 7B
+  name: "meta-llama/Llama-3.2-1B"
   torch_dtype: bfloat16
 
+# 详细版配置：weight 4-bit + input 8-bit + output 不量化
 quant:
   method: "qat"
-  bits: 4                           # 公司卡跑 4-bit QAT
-  symmetric: true
-  per_channel: true
-  qat:
-    start_epoch: 1                  # 第 1 个 epoch 开始伪量化
-    calibrate_first: true
+  weight:
+    type: "ste"
+    bits: 4
+    symmetric: true
+    per_channel: true
+    enabled: true
+  input:
+    type: "ste"
+    bits: 8
+    symmetric: false
+    per_channel: false
+    enabled: false           # 暂时不打开，后续实验逐步开启
+  output:
+    enabled: false
 
 training:
   output_dir: "checkpoints/"
   num_epochs: 5
-  per_device_batch_size: 4          # 1B + 4bit QAT，24G 卡够用
+  per_device_batch_size: 4
   gradient_accumulation_steps: 4
   learning_rate: 2e-5
   warmup_steps: 200
@@ -22,7 +33,7 @@ training:
   save_steps: 200
   eval_steps: 200
   fp16: true
-  distributed: false                # 单卡训练
+  distributed: false
 
 data:
   dataset: "wikitext"

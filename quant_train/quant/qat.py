@@ -1,98 +1,86 @@
-"""QAT —— Quantization-Aware Training 核心实现
+"""QAT —— 用 QuantLinear 替换 nn.Linear，可插拔 Quantizer。
 
-核心思想：在前向传播中插入 FakeQuant 节点（量化→反量化），
-让模型在训练时"感知"量化带来的精度损失，从而调整权重来补偿。
-
-此模块全部用纯 PyTorch 实现，CPU 上即可运行和测试。
+核心改动：
+  - QuantLinear 有 3 个 Quantizer 槽位，各自独立配置
+  - _replace_linear_recursive 根据 config 自动创建并注入 Quantizer
+  - prepare_model_with_quant 为入口函数
 """
 
+from typing import Optional, Dict, Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
+
+from quant_train.quant.base import BaseQuantizer
+from quant_train.quant.ste import STEQuantizer
 
 
-class FakeQuantize(torch.autograd.Function):
-    """前向：量化→反量化；反向：STE (Straight-Through Estimator)。
+# ── Quantizer 注册表 ───────────────────────────────────────
+# 扩展时在这里加：新名字 → 新类
+QUANTIZER_REGISTRY: Dict[str, type] = {
+    "ste": STEQuantizer,
+    # "lsq": LSQQuantizer,     # 预留
+    # "pact": PACTQuantizer,   # 预留
+    # "your_method": YourQuantizer,
+}
 
-    - 对输入 x: gradient 直接绕过量化截断（标准 STE）
-    - 对 scale/zero_point: 通过量化的解析梯度传播（LSQ 风格）
+
+def create_quantizer(
+    cfg: Optional[Dict[str, Any]],
+    example_x: torch.Tensor,
+) -> Optional[BaseQuantizer]:
+    """从配置字典创建 Quantizer，并用 example_x 校准。
+
+    cfg = None 或 {"enabled": false} → 返回 None（不量化）
     """
+    if cfg is None:
+        return None
+    if not cfg.get("enabled", True):
+        return None
 
-    @staticmethod
-    def forward(ctx, x, scale, zero_point, bits, symmetric):
-        qmin, qmax = 0, (1 << bits) - 1
-        x_div = x / scale
-        if symmetric:
-            x_q = torch.clamp(torch.round(x_div), qmin, qmax)
-            x_dq = x_q * scale
-        else:
-            x_q = torch.clamp(torch.round(x_div + zero_point), qmin, qmax)
-            x_dq = (x_q - zero_point) * scale
-        ctx.save_for_backward(x_q, scale, zero_point)
-        ctx.symmetric = symmetric
-        return x_dq
+    method = cfg.pop("type", "ste")
+    cls = QUANTIZER_REGISTRY.get(method)
+    if cls is None:
+        raise ValueError(f"未知量化器类型: {method}，可用: {list(QUANTIZER_REGISTRY.keys())}")
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        x_q, scale, zero_point = ctx.saved_tensors
-        symmetric = ctx.symmetric
-        # STE: x 的梯度原样通过
-        grad_x = grad_output
-        # scale/zero_point 梯度: 用 grad_output 在 batch 维求和, 再 reshape 匹配 shape
-        grad_scale = None
-        grad_zero_point = None
-        if ctx.needs_input_grad[1]:
-            # ∂x_dq/∂scale = x_q (对称) 或 x_q - zp (非对称)
-            raw = grad_output * (x_q - zero_point)
-            grad_scale = raw.reshape(-1, *scale.shape).sum(dim=0)
-        if ctx.needs_input_grad[2] and not symmetric:
-            raw = -grad_output * scale
-            grad_zero_point = raw.reshape(-1, *zero_point.shape).sum(dim=0)
-        return grad_x, grad_scale, grad_zero_point, None, None
+    q = cls(
+        bits=cfg.get("bits", 8),
+        symmetric=cfg.get("symmetric", False),
+        per_channel=cfg.get("per_channel", True),
+    )
+    q.calibrate(example_x)
+    return q
 
 
-def _ste_quant(x, scale, zero_point, bits, symmetric):
-    """量化→反量化的前向计算，返回浮点但已"量化感知"的值。"""
-    qmin, qmax = 0, (1 << bits) - 1
+# ── QuantLinear ─────────────────────────────────────────────
 
-    x_div = x / scale
-    if symmetric:
-        # 对称量化：zero_point = 0
-        x_q = torch.clamp(torch.round(x_div), qmin, qmax)
-    else:
-        x_q = torch.clamp(torch.round(x_div + zero_point), qmin, qmax)
+class QuantLinear(nn.Module):
+    """带可插拔 Quantizer 的线性层。
 
-    if symmetric:
-        x_dq = x_q * scale
-    else:
-        x_dq = (x_q - zero_point) * scale
+    Args:
+        in_features: 输入维度
+        out_features: 输出维度
+        bias: 是否使用 bias
+        weight_quantizer: weight 量化器（权重伪量化）
+        input_quantizer: 输入量化器（激活伪量化）
+        output_quantizer: 输出量化器（输出伪量化）
 
-    return x_dq
-
-
-class FakeQuantLinear(nn.Module):
-    """带 FakeQuant 的线性层。
-
-    训练中：weight 先经过 FakeQuantize 再做 forward
-    推理时：可导出为真正量化的权重（在本层外做导出）
+    前向流程:
+        input_quant → F.linear(weight_quant(weight)) → output_quant
     """
 
     def __init__(
         self,
         in_features: int,
         out_features: int,
-        bits: int = 8,
-        symmetric: bool = False,
-        per_channel: bool = True,
         bias: bool = True,
+        weight_quantizer: Optional[BaseQuantizer] = None,
+        input_quantizer: Optional[BaseQuantizer] = None,
+        output_quantizer: Optional[BaseQuantizer] = None,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.bits = bits
-        self.symmetric = symmetric
-        self.per_channel = per_channel
 
         self.weight = nn.Parameter(torch.randn(out_features, in_features))
         if bias:
@@ -100,111 +88,129 @@ class FakeQuantLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
-        # Quantization parameters —— 训练中自动学习
-        if per_channel:
-            self.scale = nn.Parameter(torch.ones(out_features, 1))
-        else:
-            self.scale = nn.Parameter(torch.ones(1))
-
-        if symmetric:
-            self.register_buffer("zero_point", torch.zeros_like(self.scale))
-        else:
-            self.zero_point = nn.Parameter(torch.zeros_like(self.scale))
-
-        self._current_epoch = 0
-        self._start_epoch = 0
-        self._enabled = True  # 训练时开关
+        self.weight_quantizer = weight_quantizer
+        self.input_quantizer = input_quantizer
+        self.output_quantizer = output_quantizer
 
     def forward(self, x):
-        if self._enabled and self._current_epoch >= self._start_epoch:
-            # QAT: weight 先过 FakeQuant
-            w_q = FakeQuantize.apply(
-                self.weight, self.scale, self.zero_point, self.bits, self.symmetric
-            )
-        else:
-            w_q = self.weight
+        if self.input_quantizer is not None:
+            x = self.input_quantizer(x)
 
-        return F.linear(x, w_q, self.bias)
+        w = self.weight
+        if self.weight_quantizer is not None:
+            w = self.weight_quantizer(w)
 
-    def set_epoch(self, epoch: int):
-        self._current_epoch = epoch
+        out = F.linear(x, w, self.bias)
+
+        if self.output_quantizer is not None:
+            out = self.output_quantizer(out)
+
+        return out
 
     def extra_repr(self):
-        return (
-            f"in={self.in_features}, out={self.out_features}, "
-            f"bits={self.bits}, symmetric={self.symmetric}, "
-            f"per_channel={self.per_channel}"
-        )
+        return f"in={self.in_features}, out={self.out_features}"
 
 
-def _replace_linear_recursive(module, bits, symmetric, per_channel, start_epoch):
-    """递归替换 nn.Linear 为 FakeQuantLinear。
+# ── 模型替换 ────────────────────────────────────────────────
+
+def _make_quant_cfg(quant_cfg: dict, role: str) -> Optional[dict]:
+    """从全局量化配置中提取指定角色（weight/input/output）的配置。"""
+    role_cfg = quant_cfg.get(role, None)
+    if role_cfg is None:
+        # 默认只量化 weight
+        if role == "weight":
+            return {
+                "type": quant_cfg.get("type", "ste"),
+                "bits": quant_cfg.get("bits", 8),
+                "symmetric": quant_cfg.get("symmetric", False),
+                "per_channel": quant_cfg.get("per_channel", True),
+            }
+        return None
+    return role_cfg
+
+
+def _create_quantizers(
+    quant_cfg: dict,
+    weight_example: torch.Tensor,
+) -> tuple:
+    """根据配置创建三个 Quantizer（weight/input/output）。
+
+    quant_cfg 支持两种格式:
+      1. 简化版: {"bits": 4, "symmetric": true}
+         只量化 weight，使用 STE
+      2. 详细版: {"weight": {...}, "input": {...}, "output": {...}}
+         分别配置每个位置的量化器
+    """
+    # 判断是简化版还是详细版
+    if any(k in quant_cfg for k in ("weight", "input", "output")):
+        # 详细版
+        w_cfg = quant_cfg.get("weight")
+        i_cfg = quant_cfg.get("input")
+        o_cfg = quant_cfg.get("output")
+    else:
+        # 简化版 → 仅 weight 量化
+        w_cfg = {**quant_cfg, "type": quant_cfg.get("type", "ste")}
+        i_cfg = None
+        o_cfg = None
+
+    weight_q = create_quantizer(w_cfg, weight_example)
+    input_q = create_quantizer(i_cfg, weight_example[:1]) if i_cfg else None
+    output_q = create_quantizer(o_cfg, weight_example[:1]) if o_cfg else None
+
+    return weight_q, input_q, output_q
+
+
+def _replace_linear_recursive(
+    module: nn.Module,
+    quant_cfg: dict,
+    current_epoch: int = 0,
+):
+    """递归替换 nn.Linear 为 QuantLinear，按配置注入 Quantizer。
 
     如果 module 本身是 nn.Linear 也替换。
     """
     if isinstance(module, nn.Linear):
-        new_layer = FakeQuantLinear(
+        weight_q, input_q, output_q = _create_quantizers(
+            quant_cfg, module.weight.data
+        )
+        new_layer = QuantLinear(
             in_features=module.in_features,
             out_features=module.out_features,
-            bits=bits,
-            symmetric=symmetric,
-            per_channel=per_channel,
             bias=module.bias is not None,
+            weight_quantizer=weight_q,
+            input_quantizer=input_q,
+            output_quantizer=output_q,
         )
         new_layer.weight.data.copy_(module.weight.data)
         if module.bias is not None:
             new_layer.bias.data.copy_(module.bias.data)
-        # 初始化 scale
-        if per_channel:
-            scale_init = module.weight.data.abs().max(dim=1, keepdim=True).values
-        else:
-            scale_init = module.weight.data.abs().max().unsqueeze(0)
-        new_layer.scale.data.copy_(scale_init / ((1 << (bits - 1)) - 1) + 1e-10)
         return new_layer
 
     for name, child in list(module.named_children()):
         if isinstance(child, nn.Linear):
-            new_layer = FakeQuantLinear(
+            weight_q, input_q, output_q = _create_quantizers(
+                quant_cfg, child.weight.data
+            )
+            new_layer = QuantLinear(
                 in_features=child.in_features,
                 out_features=child.out_features,
-                bits=bits,
-                symmetric=symmetric,
-                per_channel=per_channel,
                 bias=child.bias is not None,
+                weight_quantizer=weight_q,
+                input_quantizer=input_q,
+                output_quantizer=output_q,
             )
-            # 复制原始权重（让模型从预训练权重开始）
             new_layer.weight.data.copy_(child.weight.data)
             if child.bias is not None:
                 new_layer.bias.data.copy_(child.bias.data)
-
-            # 初始化 scale —— 用权重的 absmax
-            if per_channel:
-                scale_init = child.weight.data.abs().max(dim=1, keepdim=True).values
-            else:
-                scale_init = child.weight.data.abs().max().unsqueeze(0)
-            # 加个小 epsilon 防止除零
-            new_layer.scale.data.copy_(scale_init / ((1 << (bits - 1)) - 1) + 1e-10)
-
             setattr(module, name, new_layer)
         else:
-            _replace_linear_recursive(child, bits, symmetric, per_channel, start_epoch)
+            _replace_linear_recursive(child, quant_cfg, current_epoch)
 
 
-def prepare_model_with_fake_quant(
+def prepare_model_with_quant(
     model: nn.Module,
-    bits: int = 8,
-    symmetric: bool = False,
-    per_channel: bool = True,
-    start_epoch: int = 0,
+    quant_cfg: dict,
 ) -> nn.Module:
-    """将模型所有 nn.Linear 替换为 FakeQuantLinear。
-
-    Args:
-        model: HuggingFace 或任意 PyTorch 模型
-        bits: 量化位数
-        symmetric: 是否对称量化
-        per_channel: 是否 per-channel 量化
-        start_epoch: 从第几个 epoch 起启用伪量化
-    """
-    _replace_linear_recursive(model, bits, symmetric, per_channel, start_epoch)
-    return model
+    """将模型所有 nn.Linear 替换为 QuantLinear。"""
+    result = _replace_linear_recursive(model, quant_cfg)
+    return result if result is not None else model

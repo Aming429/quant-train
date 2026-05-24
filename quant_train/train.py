@@ -61,15 +61,10 @@ def main():
     model = load_base_model(model_name, torch_dtype=torch_dtype)
 
     quant_cfg = config.get("quant", {})
-    print(f"[INFO] 准备 QAT: {quant_cfg.get('bits')}-bit, "
-          f"symmetric={quant_cfg.get('symmetric')}, "
-          f"per_channel={quant_cfg.get('per_channel')}")
+    print(f"[INFO] 量化配置: {quant_cfg}")
     model = prepare_for_qat(
         model,
-        bits=quant_cfg.get("bits", 8),
-        symmetric=quant_cfg.get("symmetric", False),
-        per_channel=quant_cfg.get("per_channel", True),
-        start_epoch=quant_cfg.get("qat", {}).get("start_epoch", 0),
+        quant_cfg=quant_cfg,
     )
 
     # 训练器

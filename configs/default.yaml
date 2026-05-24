@@ -1,36 +1,60 @@
-# 默认训练配置
+# 默认训练配置（本地开发用）
 
 model:
-  name: "Qwen/Qwen2.5-0.5B"        # 本地开发用 ~0.5B 模型，公司可改成 7B
-  load_in_8bit: false
-  torch_dtype: float32              # CPU 开发时用 float32
+  name: "Qwen/Qwen2.5-0.5B"
+  torch_dtype: float32
+
+# ── 量化配置 ─────────────────────────────────────────────
+# 两种写法：
+#
+# 1. 简化版（只量化 weight，用默认 STE）：
+#    quant:
+#      bits: 4
+#      symmetric: true
+#      per_channel: true
+#
+# 2. 详细版（分别配置三个 Quantizer 位置）：
+#    quant:
+#      weight:                    # weight 量化
+#        type: ste                # 量化算法（注册在 QUANTIZER_REGISTRY 中）
+#        bits: 4
+#        symmetric: true
+#        per_channel: true
+#        enabled: true
+#      input:                     # 输入激活量化（默认不开启）
+#        type: ste
+#        bits: 8
+#        symmetric: false
+#        per_channel: false
+#        enabled: false
+#      output:                    # 输出激活量化（默认不开启）
+#        enabled: false
+#
+# 加新算法：在 QUANTIZER_REGISTRY 注册 → type 里写类名即可
 
 quant:
-  method: "qat"                     # qat | lsq | gptq_ft
+  # 简化版 —— 只量化 weight，8-bit per-channel 非对称
+  method: "qat"
   bits: 8
   symmetric: false
   per_channel: true
-  # QAT 参数
-  qat:
-    start_epoch: 0                  # 从第几个 epoch 开始插入伪量化
-    calibrate_first: true           # 先跑 calibration 初始化 scale/zero_point
 
 training:
   output_dir: "checkpoints/"
   num_epochs: 3
-  per_device_batch_size: 2          # CPU 调小，公司卡改大
+  per_device_batch_size: 2
   gradient_accumulation_steps: 1
   learning_rate: 5e-5
   warmup_steps: 100
   logging_steps: 10
   save_steps: 500
   eval_steps: 500
-  fp16: false                       # CPU 不开，公司卡改为 true
+  fp16: false
   distributed: false
 
 data:
   dataset: "wikitext"
   subset: "wikitext-2-v1"
   text_column: "text"
-  max_seq_length: 128               # 本地调小，公司改 2048
+  max_seq_length: 128
   val_split: 0.05

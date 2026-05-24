@@ -1,50 +1,71 @@
-"""测试 fake quant layer 的前向和反向"""
+"""测试 QuantLinear + 可插拔 Quantizer"""
 
 import torch
 import pytest
 
-from quant_train.quant.qat import FakeQuantLinear, FakeQuantize
+from quant_train.quant.qat import QuantLinear, prepare_model_with_quant
+from quant_train.quant.ste import STEQuantizer
 
 
-class TestFakeQuantLinear:
-    def test_forward_backward(self):
-        """验证前向不崩溃 + 反向能传梯度。"""
-        layer = FakeQuantLinear(32, 64, bits=8, symmetric=False, per_channel=True)
+class TestQuantLinear:
+    def test_weight_quant_forward_backward(self):
+        """weight 量化：前向不崩溃 + 反向传梯度到 weight 和 scale。"""
+        wq = STEQuantizer(bits=8, symmetric=False, per_channel=True)
+        layer = QuantLinear(32, 64, weight_quantizer=wq)
+        wq.calibrate(layer.weight.data)
+
         x = torch.randn(4, 32)
         out = layer(x)
         loss = out.sum()
         loss.backward()
-        assert layer.weight.grad is not None, "梯度应传回 weight"
-        assert layer.scale.grad is not None, "梯度应传回 scale"
 
-    def test_symmetric_quant(self):
-        """对称量化：scale 应为正数，zero_point 应为 0。"""
-        layer = FakeQuantLinear(16, 16, bits=4, symmetric=True, per_channel=False)
+        assert layer.weight.grad is not None, "weight 应有梯度"
+        assert wq.scale.grad is not None, "scale 应有梯度"
+
+    def test_input_quant(self):
+        """input 量化不影响反向传播。"""
+        wq = STEQuantizer(bits=8, symmetric=False, per_channel=True)
+        iq = STEQuantizer(bits=8, symmetric=False, per_channel=False)
+        layer = QuantLinear(16, 32, weight_quantizer=wq, input_quantizer=iq)
+        wq.calibrate(layer.weight.data)
+        iq.calibrate(torch.randn(1, 16))
+
         x = torch.randn(2, 16)
-        _ = layer(x)
-        assert (layer.scale > 0).all(), "scale 必须为正"
-        assert (layer.zero_point == 0).all(), "对称量化 zero_point 应为 0"
+        out = layer(x)
+        out.sum().backward()
+        assert layer.weight.grad is not None
+
+    def test_no_quant_passthrough(self):
+        """全部量化器为 None 时等同普通 Linear。"""
+        layer = QuantLinear(10, 20)
+        x = torch.randn(3, 10)
+        out = layer(x)
+        assert out.shape == (3, 20)
 
     def test_weight_preserved_after_replace(self):
-        """替换后权重应与原 Linear 一致（初始化时，且 root 自身也应替换）。"""
+        """替换后权重应与原 Linear 一致。"""
         original = torch.nn.Linear(10, 20)
         orig_weight = original.weight.data.clone()
 
-        from quant_train.quant.qat import _replace_linear_recursive
-        replaced = _replace_linear_recursive(original, bits=8, symmetric=False, per_channel=False, start_epoch=0)
+        replaced = prepare_model_with_quant(
+            original, {"bits": 8, "symmetric": False, "per_channel": True}
+        )
 
-        assert isinstance(replaced, FakeQuantLinear), "root Linear 应被替换为 FakeQuantLinear"
+        assert isinstance(replaced, QuantLinear), "root Linear 应被替换为 QuantLinear"
         assert torch.allclose(replaced.weight.data, orig_weight), "权重应被保留"
 
-    def test_epoch_gating(self):
-        """验证 set_epoch 控制伪量化开关。"""
-        layer = FakeQuantLinear(8, 8, bits=4, symmetric=False, per_channel=False)
-        x = torch.randn(1, 8)
-
-        layer.set_epoch(0)
-        layer._start_epoch = 2  # 从 epoch 2 开始伪量化
-        out_disabled = layer(x)  # epoch=0 < 2，不量化
-
-        layer.set_epoch(2)
-        out_enabled = layer(x)   # epoch=2 >= 2，量化
-        assert not torch.allclose(out_disabled, out_enabled), "启用量化后输出应变化"
+    def test_detailed_config_parse(self):
+        """详细版配置应正确解析。"""
+        cfg = {
+            "weight": {"type": "ste", "bits": 4, "symmetric": True, "per_channel": True},
+            "input": {"enabled": False},
+            "output": {"enabled": False},
+        }
+        original = torch.nn.Linear(16, 32)
+        replaced = prepare_model_with_quant(original, cfg)
+        assert isinstance(replaced, QuantLinear)
+        assert replaced.weight_quantizer is not None
+        assert replaced.weight_quantizer.bits == 4
+        assert replaced.weight_quantizer.symmetric is True
+        assert replaced.input_quantizer is None
+        assert replaced.output_quantizer is None

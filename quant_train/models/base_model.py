@@ -1,4 +1,4 @@
-"""基础模型包装 —— 加载 HuggingFace 模型，插入伪量化节点"""
+"""基础模型包装 —— 加载 HuggingFace 模型，插入 QuantLinear。"""
 
 from typing import Optional
 
@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, PreTrainedModel
 
-from quant_train.quant.qat import prepare_model_with_fake_quant
+from quant_train.quant.qat import prepare_model_with_quant
 
 
 def load_base_model(
@@ -31,20 +31,21 @@ def load_base_model(
 
 def prepare_for_qat(
     model: nn.Module,
-    bits: int = 8,
-    symmetric: bool = False,
-    per_channel: bool = True,
-    start_epoch: int = 0,
+    quant_cfg: dict,
 ) -> nn.Module:
-    """将模型中的线性层替换为伪量化版本，为 QAT 做准备。
+    """将模型中的线性层替换为带 Quantizer 的 QuantLinear。
 
-    返回的 model 在 CPU 上即可跑 forward/backward，
-    scale/zero_point 会在训练中学习。
+    quant_cfg 格式:
+      # 简化版
+      {"bits": 4, "symmetric": true, "per_channel": true}
+
+      # 详细版（分别配置 weight/input/output）
+      {
+        "weight": {"type": "ste", "bits": 4, "symmetric": true, "per_channel": true},
+        "input": {"enabled": false},
+        "output": {"enabled": false},
+      }
+
+    加新量化算法：在 QUANTIZER_REGISTRY 注册后，type 字段切换即可。
     """
-    return prepare_model_with_fake_quant(
-        model,
-        bits=bits,
-        symmetric=symmetric,
-        per_channel=per_channel,
-        start_epoch=start_epoch,
-    )
+    return prepare_model_with_quant(model, quant_cfg)
