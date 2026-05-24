@@ -1,0 +1,35 @@
+# 本地开发环境（Mac CPU）
+# 使用: conda env create -f environment.yaml
+name: quant-train
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip=23
+
+  # PyTorch CPU 版 —— Mac 上没有 CUDA，但能跑 forward/backward
+  - pytorch=2.5
+  - torchvision
+  - cpuonly
+
+  # 数据处理
+  - numpy
+  - datasets>=2.20
+
+  # 工具
+  - tqdm
+  - pyyaml
+  - pytest
+  - pytest-cov
+  - rich                    # 好看的训练日志输出
+
+  # 管道
+  - pip:
+    - transformers>=4.45      # HuggingFace
+    - accelerate>=1.0         # 混合精度 / device_map
+    - tensorboard             # 日志可视化
+    - wandb                   # 实验追踪（选装）
+    - einops                  # 张量重排
+    - sentencepiece           # tokenizer 依赖

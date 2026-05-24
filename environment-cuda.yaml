@@ -1,0 +1,40 @@
+# 公司 GPU 训练环境（Linux + CUDA）
+# 使用: conda env create -f environment-cuda.yaml
+name: quant-train-cuda
+channels:
+  - pytorch
+  - conda-forge
+  - nvidia
+  - defaults
+dependencies:
+  - python=3.10
+  - pip=23
+
+  # PyTorch CUDA —— 适配公司卡（如 A100/4090/3090）
+  - pytorch=2.5
+  - torchvision
+  - pytorch-cuda=12.4
+
+  # 数据处理
+  - numpy
+  - datasets>=2.20
+
+  # 工具
+  - tqdm
+  - pyyaml
+  - pytest
+  - pytest-cov
+  - rich
+
+  # 管道
+  - pip:
+    - transformers>=4.45
+    - accelerate>=1.0
+    - tensorboard
+    - wandb
+    - einops
+    - sentencepiece
+    - bitsandbytes>=0.44       # QLoRA 底层算子
+    - triton                   # flash-attn 等高性能算子依赖
+    - flash-attn               # 加速公司卡训练（选装，需编译）
+    - nvitop                   # GPU 状态监控

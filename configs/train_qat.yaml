@@ -1,0 +1,32 @@
+model:
+  name: "meta-llama/Llama-3.2-1B"   # 1B 在公司卡上跑，先不要上 7B
+  torch_dtype: bfloat16
+
+quant:
+  method: "qat"
+  bits: 4                           # 公司卡跑 4-bit QAT
+  symmetric: true
+  per_channel: true
+  qat:
+    start_epoch: 1                  # 第 1 个 epoch 开始伪量化
+    calibrate_first: true
+
+training:
+  output_dir: "checkpoints/"
+  num_epochs: 5
+  per_device_batch_size: 4          # 1B + 4bit QAT，24G 卡够用
+  gradient_accumulation_steps: 4
+  learning_rate: 2e-5
+  warmup_steps: 200
+  logging_steps: 10
+  save_steps: 200
+  eval_steps: 200
+  fp16: true
+  distributed: false                # 单卡训练
+
+data:
+  dataset: "wikitext"
+  subset: "wikitext-2-v1"
+  text_column: "text"
+  max_seq_length: 512
+  val_split: 0.05
