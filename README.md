@@ -99,17 +99,54 @@ conda activate quant-train
 
 ### GPU 环境（`environment-cuda.yaml`）
 
+> ⚠️ **安装前先确认公司机器 CUDA 版本**：
+> ```bash
+> nvidia-smi                    # 查看驱动支持的最高 CUDA
+> nvcc --version                # 查看当前使用的 CUDA Toolkit
+> module list                   # 有些公司用 module 管理
+> ```
+
 | 依赖 | 版本 | 用途 |
 |------|------|------|
-| pytorch | 2.5 (CUDA 12.4) | GPU 计算 |
+| pytorch | 2.5 (CUDA 自动检测) | GPU 计算 |
 | bitsandbytes | >=0.44 | 量化算子 |
-| flash-attn | 选装 | 加速 attention |
+| flash-attn / xformers | 选装 | 加速 attention |
 | nvitop | latest | GPU 监控 |
+| lm-eval | 0.4.7 | 模型评估 |
 
-创建：
+创建（需要根据 CUDA 版本调整 `pytorch-cuda` 版本）：
 ```bash
+# CUDA 12.4（H100 / 新驱动）
 conda env create -f environment-cuda.yaml
+
+# CUDA 12.1（A100 常见）
+CONDA_OVERRIDE_CUDA=12.1 conda env create -f environment-cuda.yaml
+# 或者装好后手动换：
+#   conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
+
+# CUDA 11.8（V100 / T4）
+CONDA_OVERRIDE_CUDA=11.8 conda env create -f environment-cuda.yaml
 conda activate quant-train-cuda
+conda install pytorch torchvision pytorch-cuda=11.8 -c pytorch -c nvidia
+
+conda activate quant-train-cuda
+```
+
+### pip-only 安装（公司没有 conda 时）
+
+```bash
+# 1. 先装 PyTorch（根据 CUDA 版本选对应的 index-url）
+pip install torch==2.5.0 torchvision \
+  --index-url https://download.pytorch.org/whl/cu124   # CUDA 12.4
+  # cu124 → CUDA 12.4, cu121 → 12.1, cu118 → 11.8, cpu → 无 GPU
+
+# 2. 装剩下的
+pip install -r requirements-cuda.txt
+
+# 如果 flash-attn 编译失败：
+pip install -r <(grep -v flash-attn requirements-cuda.txt)
+# 或用替代：
+pip install xformers
 ```
 
 ---

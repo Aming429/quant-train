@@ -1,0 +1,40 @@
+# pip-only 安装（公司没有 conda 时用）
+#
+# 用法:
+#   # 先确认 PyTorch + CUDA 版本
+#   pip install torch==2.5.0 torchvision --index-url https://download.pytorch.org/whl/cu124
+#   #   CUDA 12.4 → cu124
+#   #   CUDA 12.1 → cu121
+#   #   CUDA 11.8 → cu118
+#   #   CPU 调试  → cpu
+#
+#   # 然后装剩下的
+#   pip install -r requirements-cuda.txt
+#
+# 如果安装 flash-attn 失败（需要 gcc + CUDA header）:
+#   # 跳过它，训练一样跑
+#   pip install -r <(grep -v flash-attn requirements-cuda.txt)
+#   # 或用替代: pip install xformers
+
+# ── HuggingFace 生态 ──
+transformers>=4.45
+accelerate>=1.0
+datasets>=2.20
+safetensors
+sentencepiece
+hf_transfer                      # 加速模型下载
+einops
+
+# ── 量化 & 训练 ──
+bitsandbytes>=0.44
+triton                           # 可选：高性能算子依赖
+# flash-attn                     # 可选：加速 attention（需编译，失败时注释掉）
+# xformers                       # 可选：flash-attn 替代方案
+
+# ── 日志 & 监控 ──
+tensorboard
+wandb                            # 可选：内网可能需要代理
+nvitop                           # GPU 监控
+
+# ── 评估 ──
+lm-eval==0.4.7                   # 可选：模型评估

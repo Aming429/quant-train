@@ -1,5 +1,15 @@
-# 公司 GPU 训练环境（Linux + CUDA）
-# 使用: conda env create -f environment-cuda.yaml
+# 公司 GPU 训练环境
+#
+# 用法:
+#   conda env create -f environment-cuda.yaml          # 自动检测 CUDA
+#   CONDA_OVERRIDE_CUDA=11.8 conda env create -f ...   # 指定 CUDA 版本
+#
+# ⚠️ 使用前先确认公司机器的 CUDA 版本:
+#   nvidia-smi  |  nvcc --version  |  module list
+#
+# 如果公司禁用 conda，用同目录下的 requirements-cuda.txt:
+#   pip install -r requirements-cuda.txt
+
 name: quant-train-cuda
 channels:
   - pytorch
@@ -10,31 +20,54 @@ dependencies:
   - python=3.10
   - pip=23
 
-  # PyTorch CUDA —— 适配公司卡（如 A100/4090/3090）
+  # ── PyTorch ──────────────────────────────────────────
+  # 如果 conda 自动检测的 CUDA 版本不对，手动指定：
+  #   conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
+  #
+  # 常见 CUDA 版本与 PyTorch 2.5 的搭配：
+  #   CUDA 11.8 → pytorch-cuda=11.8  （V100/T4）
+  #   CUDA 12.1 → pytorch-cuda=12.1  （A100 常见）
+  #   CUDA 12.4 → pytorch-cuda=12.4  （H100/新驱动）
   - pytorch=2.5
   - torchvision
-  - pytorch-cuda=12.4
+  - pytorch-cuda=12.4          # ← 根据公司实际版本改这里
 
-  # 数据处理
+  # ── 数据处理 ────────────────────────────────────────
   - numpy
   - datasets>=2.20
 
-  # 工具
+  # ── 工具 ────────────────────────────────────────────
   - tqdm
   - pyyaml
-  - pytest
-  - pytest-cov
-  - rich
+  - rich                       # 训练日志美化
+  - nvitop                     # GPU 状态监控（watch -n 1 nvitop）
 
-  # 管道
+  # ── pip 安装的包 ────────────────────────────────────
   - pip:
+    # HuggingFace 生态
     - transformers>=4.45
     - accelerate>=1.0
-    - tensorboard
-    - wandb
-    - einops
+    - safetensors
     - sentencepiece
-    - bitsandbytes>=0.44       # QLoRA 底层算子
-    - triton                   # flash-attn 等高性能算子依赖
-    - flash-attn               # 加速公司卡训练（选装，需编译）
-    - nvitop                   # GPU 状态监控
+    - hf_transfer              # 加速 HF 模型下载
+    - einops
+
+    # 训练
+    - bitsandbytes>=0.44       # QLoRA / 8-bit 优化器
+    - datasets>=2.20
+
+    # 日志 & 监控
+    - tensorboard
+    - wandb                    # 实验追踪（可选，公司内网可能需要代理）
+
+    # ── 以下为可选高性能算子 ──────────────────────────
+    # 如果安装失败，注释掉对应的行即可，不影响核心功能
+    # triton: flash-attn 的依赖，pip 安装可能报错，改成 conda 安装更稳
+    # flash-attn: 需要 gcc + CUDA header，编译失败时改用 xformers 替代
+    - triton                   # 可选：高性能算子（conda: conda install -c conda-forge triton）
+    - flash-attn               # 可选：加速 attention（安装: pip install flash-attn --no-build-isolation）
+    # 替代方案（如果 flash-attn 编译失败）:
+    # - xformers               # pip install xformers（更易装，速度稍慢）
+
+    # 评估（训练完后算困惑度 / 跑 benchmark）
+    - lm-eval==0.4.7           # 可选：模型评估框架
